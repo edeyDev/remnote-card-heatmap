@@ -1,5 +1,5 @@
 import { renderWidget, usePlugin, useTracker, WidgetLocation } from '@remnote/plugin-sdk';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import '../style.css';
 import '../index.css';
 
@@ -53,6 +53,7 @@ export const CardHeatmap = () => {
   const [refreshKey, setRefreshKey] = useState(0);
   const [filter, setFilter] = useState<'all' | Level>('all');
   const [sort, setSort] = useState<SortMode>('difficulty');
+  const originalVisibility = useRef(new Map<string, 'hidden' | 'included' | 'none' | undefined>());
 
   const rows = useTracker(async () => {
     if (!context?.documentId) return [] as CardRow[];
@@ -70,6 +71,7 @@ export const CardHeatmap = () => {
     }
     return result;
   }, [context?.documentId, refreshKey, settings.masteredReviews, settings.masteredSuccess, settings.difficultSuccess]);
+  const cards = rows ?? [];
 
   // Refresh periodically so the map changes after a study session without reloading the note.
   useEffect(() => {
@@ -98,7 +100,35 @@ export const CardHeatmap = () => {
     return () => { cancelled = true; };
   }, [rows, plugin]);
 
-  const cards = rows ?? [];
+  // Sincroniza el filtro con la nota: los Rems que no pertenecen al estado
+  // seleccionado se ocultan en el contexto de este documento. Al volver a
+  // "Todas" se recupera exactamente el estado que tenía cada Rem.
+  useEffect(() => {
+    const documentId = context?.documentId;
+    if (!documentId || !cards.length) return;
+    let cancelled = false;
+    const applyDocumentFilter = async () => {
+      const remIds = [...new Set(cards.map((card) => card.remId))];
+      for (const remId of remIds) {
+        if (cancelled) return;
+        const rem = await plugin.rem.findOne(remId);
+        if (!rem) continue;
+        if (!originalVisibility.current.has(remId)) {
+          originalVisibility.current.set(remId, await rem.getHiddenExplicitlyIncludedState(documentId));
+        }
+        if (filter === 'all') {
+          await rem.setHiddenExplicitlyIncludedState(originalVisibility.current.get(remId) ?? 'none', documentId);
+        } else {
+          const matching = cards.some((card) => card.remId === remId && card.level === filter);
+          await rem.setHiddenExplicitlyIncludedState(matching ? 'included' : 'hidden', documentId);
+        }
+      }
+      if (filter === 'all') originalVisibility.current.clear();
+    };
+    void applyDocumentFilter();
+    return () => { cancelled = true; };
+  }, [filter, context?.documentId, cards, plugin]);
+
   const visible = useMemo(() => {
     const filtered = filter === 'all' ? [...cards] : cards.filter((card) => card.level === filter);
     return filtered.sort((a, b) => sort === 'success' ? a.success - b.success : sort === 'recent' ? Number(b.lastScore ?? -1) - Number(a.lastScore ?? -1) : priority[b.level] - priority[a.level]);
