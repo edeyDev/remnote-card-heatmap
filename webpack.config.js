@@ -22,7 +22,7 @@ const SANDBOX_SUFFIX = '-sandbox';
 
 const config = {
   mode: isProd ? 'production' : 'development',
-  entry: glob.sync('./src/widgets/**/*.tsx').reduce((obj, el) => {
+  entry: glob.sync('./src/widgets/**/*.tsx').filter((el) => !el.endsWith('sample_widget.tsx')).reduce((obj, el) => {
     const rel = path
       .relative('src/widgets', el)
       .replace(/\.[tj]sx?$/, '')

@@ -1,11 +1,11 @@
-import { renderWidget, usePlugin, useTracker, WidgetLocation } from '@remnote/plugin-sdk';
+import { AppEvents, renderWidget, usePlugin, useTracker, WidgetLocation } from '@remnote/plugin-sdk';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import '../style.css';
 import '../index.css';
 
 type Level = 'mastered' | 'steady' | 'difficult' | 'new';
 type SortMode = 'difficulty' | 'recent' | 'success';
-type Config = { masteredReviews: number; masteredSuccess: number; difficultSuccess: number };
+type Config = { masteredReviews: number; masteredSuccess: number; difficultSuccess: number; includeDescendants: boolean };
 type CardRow = {
   id: string;
   remId: string;
@@ -16,7 +16,7 @@ type CardRow = {
   lastScore: number | null;
 };
 
-const DEFAULT_CONFIG: Config = { masteredReviews: 4, masteredSuccess: 0.9, difficultSuccess: 0.65 };
+const DEFAULT_CONFIG: Config = { masteredReviews: 4, masteredSuccess: 0.9, difficultSuccess: 0.65, includeDescendants: true };
 const priority: Record<Level, number> = { new: 0, mastered: 1, steady: 2, difficult: 3 };
 
 const plainText = (value: any): string => {
@@ -48,6 +48,7 @@ export const CardHeatmap = () => {
     masteredReviews: await plugin.settings.getSetting<number>('mastered-reviews') ?? DEFAULT_CONFIG.masteredReviews,
     masteredSuccess: (await plugin.settings.getSetting<number>('mastered-success') ?? 90) / 100,
     difficultSuccess: (await plugin.settings.getSetting<number>('difficult-success') ?? 65) / 100,
+    includeDescendants: await plugin.settings.getSetting<boolean>('include-descendants') ?? true,
   }), []);
   const settings = config ?? DEFAULT_CONFIG;
   const [refreshKey, setRefreshKey] = useState(0);
@@ -76,8 +77,15 @@ export const CardHeatmap = () => {
   // Refresh periodically so the map changes after a study session without reloading the note.
   useEffect(() => {
     const timer = window.setInterval(() => setRefreshKey((value) => value + 1), 60_000);
-    return () => window.clearInterval(timer);
-  }, []);
+    const onRemChanged = () => setRefreshKey((value) => value + 1);
+    plugin.event.addListener(AppEvents.RemChanged, 'card-heatmap-refresh', onRemChanged);
+    plugin.event.addListener(AppEvents.QueueCompleteCard, 'card-heatmap-refresh', onRemChanged);
+    return () => {
+      window.clearInterval(timer);
+      plugin.event.removeListener(AppEvents.RemChanged, 'card-heatmap-refresh', onRemChanged);
+      plugin.event.removeListener(AppEvents.QueueCompleteCard, 'card-heatmap-refresh', onRemChanged);
+    };
+  }, [plugin]);
 
   // Color the real Rem, but never overwrite a highlight chosen manually by the user.
   useEffect(() => {
@@ -94,7 +102,7 @@ export const CardHeatmap = () => {
         const rem = await plugin.rem.findOne(remId);
         if (!rem) continue;
         levelByItem.set(remId, level);
-        for (const child of await rem.getDescendants()) {
+        for (const child of settings.includeDescendants ? await rem.getDescendants() : []) {
           const current = levelByItem.get(child._id);
           if (!current || priority[level] > priority[current]) levelByItem.set(child._id, level);
         }
@@ -109,7 +117,7 @@ export const CardHeatmap = () => {
     };
     if (rows?.length) void applyColors();
     return () => { cancelled = true; };
-  }, [rows, plugin]);
+  }, [rows, plugin, settings.includeDescendants]);
 
   // Sincroniza el filtro con la nota: los Rems que no pertenecen al estado
   // seleccionado se ocultan en el contexto de este documento. Al volver a
@@ -125,7 +133,7 @@ export const CardHeatmap = () => {
         if (!root) continue;
         const currentRoot = levelByItem.get(root._id);
         if (!currentRoot || priority[card.level] > priority[currentRoot]) levelByItem.set(root._id, card.level);
-        for (const child of await root.getDescendants()) {
+        for (const child of settings.includeDescendants ? await root.getDescendants() : []) {
           const current = levelByItem.get(child._id);
           if (!current || priority[card.level] > priority[current]) levelByItem.set(child._id, card.level);
         }
@@ -147,7 +155,7 @@ export const CardHeatmap = () => {
     };
     void applyDocumentFilter();
     return () => { cancelled = true; };
-  }, [filter, context?.documentId, cards, plugin]);
+  }, [filter, context?.documentId, cards, plugin, settings.includeDescendants]);
 
   const visible = useMemo(() => {
     const filtered = filter === 'all' ? [...cards] : cards.filter((card) => card.level === filter);
@@ -155,6 +163,7 @@ export const CardHeatmap = () => {
   }, [cards, filter, sort]);
   const counts = useMemo(() => cards.reduce((acc, card) => ({ ...acc, [card.level]: acc[card.level] + 1 }), { mastered: 0, steady: 0, difficult: 0, new: 0 } as Record<Level, number>), [cards]);
   const masteredPercent = cards.length ? Math.round((counts.mastered / cards.length) * 100) : 0;
+  const averageRetention = cards.length ? Math.round(cards.reduce((sum, card) => sum + card.success, 0) / cards.length * 100) : 0;
 
   const openCard = async (row: CardRow) => {
     const rem = await plugin.rem.findOne(row.remId);
@@ -167,16 +176,16 @@ export const CardHeatmap = () => {
   return (
     <section className="ch-card" aria-label="Mapa visual de dificultad de tarjetas">
       <div className="ch-header">
-        <div><div className="ch-title">Mapa de dominio</div><div className="ch-subtitle">{cards.length} tarjetas · {masteredPercent}% dominadas</div></div>
-        <button className="ch-refresh" onClick={() => setRefreshKey((value) => value + 1)} title="Actualizar análisis">↻</button>
+        <div><div className="ch-title">Mapa de dominio</div><div className="ch-subtitle">{cards.length} tarjetas · {masteredPercent}% dominadas · {averageRetention}% retención media</div></div>
+        <button className="ch-refresh" onClick={() => setRefreshKey((value) => value + 1)} title="Actualizar análisis" aria-label="Actualizar análisis">↻</button>
       </div>
       <div className="ch-progress"><span style={{ width: `${masteredPercent}%` }} /></div>
       <div className="ch-legend">
-        <button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>Todas <b>{cards.length}</b></button>
-        <button className={filter === 'mastered' ? 'active mastered' : 'mastered'} onClick={() => setFilter('mastered')}><i />Dominadas <b>{counts.mastered}</b></button>
-        <button className={filter === 'steady' ? 'active steady' : 'steady'} onClick={() => setFilter('steady')}><i />En progreso <b>{counts.steady}</b></button>
-        <button className={filter === 'difficult' ? 'active difficult' : 'difficult'} onClick={() => setFilter('difficult')}><i />Difíciles <b>{counts.difficult}</b></button>
-        <button className={filter === 'new' ? 'active new' : 'new'} onClick={() => setFilter('new')}><i />Nuevas <b>{counts.new}</b></button>
+        <button aria-pressed={filter === 'all'} className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>Todas <b>{cards.length}</b></button>
+        <button aria-pressed={filter === 'mastered'} className={filter === 'mastered' ? 'active mastered' : 'mastered'} onClick={() => setFilter('mastered')}><i />Dominadas <b>{counts.mastered}</b></button>
+        <button aria-pressed={filter === 'steady'} className={filter === 'steady' ? 'active steady' : 'steady'} onClick={() => setFilter('steady')}><i />En progreso <b>{counts.steady}</b></button>
+        <button aria-pressed={filter === 'difficult'} className={filter === 'difficult' ? 'active difficult' : 'difficult'} onClick={() => setFilter('difficult')}><i />Difíciles <b>{counts.difficult}</b></button>
+        <button aria-pressed={filter === 'new'} className={filter === 'new' ? 'active new' : 'new'} onClick={() => setFilter('new')}><i />Nuevas <b>{counts.new}</b></button>
       </div>
       <label className="ch-sort">Ordenar por:
         <select value={sort} onChange={(event) => setSort(event.target.value as SortMode)}>

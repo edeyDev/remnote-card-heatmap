@@ -6,6 +6,9 @@ async function onActivate(plugin: ReactRNPlugin) {
   await plugin.settings.registerNumberSetting({
     id: 'mastered-reviews', title: 'Repasos mínimos para considerar dominada', defaultValue: 4,
   });
+  await plugin.settings.registerBooleanSetting({
+    id: 'include-descendants', title: 'Colorear y filtrar Rems dependientes', defaultValue: true,
+  });
   await plugin.settings.registerNumberSetting({
     id: 'mastered-success', title: 'Retención mínima para considerar dominada (%)', defaultValue: 90,
   });
