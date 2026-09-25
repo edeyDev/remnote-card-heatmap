@@ -88,7 +88,18 @@ export const CardHeatmap = () => {
         const current = levelByRem.get(row.remId);
         if (!current || priority[row.level] > priority[current]) levelByRem.set(row.remId, row.level);
       }
+      const levelByItem = new Map<string, Level>();
       for (const [remId, level] of levelByRem) {
+        if (cancelled) return;
+        const rem = await plugin.rem.findOne(remId);
+        if (!rem) continue;
+        levelByItem.set(remId, level);
+        for (const child of await rem.getDescendants()) {
+          const current = levelByItem.get(child._id);
+          if (!current || priority[level] > priority[current]) levelByItem.set(child._id, level);
+        }
+      }
+      for (const [remId, level] of levelByItem) {
         if (cancelled || level === 'new') continue;
         const rem = await plugin.rem.findOne(remId);
         if (!rem || cancelled || await rem.getHighlightColor()) continue;
@@ -108,8 +119,18 @@ export const CardHeatmap = () => {
     if (!documentId || !cards.length) return;
     let cancelled = false;
     const applyDocumentFilter = async () => {
-      const remIds = [...new Set(cards.map((card) => card.remId))];
-      for (const remId of remIds) {
+      const levelByItem = new Map<string, Level>();
+      for (const card of cards) {
+        const root = await plugin.rem.findOne(card.remId);
+        if (!root) continue;
+        const currentRoot = levelByItem.get(root._id);
+        if (!currentRoot || priority[card.level] > priority[currentRoot]) levelByItem.set(root._id, card.level);
+        for (const child of await root.getDescendants()) {
+          const current = levelByItem.get(child._id);
+          if (!current || priority[card.level] > priority[current]) levelByItem.set(child._id, card.level);
+        }
+      }
+      for (const [remId, itemLevel] of levelByItem) {
         if (cancelled) return;
         const rem = await plugin.rem.findOne(remId);
         if (!rem) continue;
@@ -119,8 +140,7 @@ export const CardHeatmap = () => {
         if (filter === 'all') {
           await rem.setHiddenExplicitlyIncludedState(originalVisibility.current.get(remId) ?? 'none', documentId);
         } else {
-          const matching = cards.some((card) => card.remId === remId && card.level === filter);
-          await rem.setHiddenExplicitlyIncludedState(matching ? 'included' : 'hidden', documentId);
+          await rem.setHiddenExplicitlyIncludedState(itemLevel === filter ? 'included' : 'hidden', documentId);
         }
       }
       if (filter === 'all') originalVisibility.current.clear();
