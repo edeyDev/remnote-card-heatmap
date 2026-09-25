@@ -13,7 +13,10 @@ const CopyPlugin = require('copy-webpack-plugin');
 const isProd = process.env.NODE_ENV === 'production';
 const isDevelopment = !isProd;
 
-const fastRefresh = isDevelopment ? new ReactRefreshWebpackPlugin() : null;
+// RemNote's plugin iframe does not support the custom event used by React
+// Fast Refresh (setCustomCSS). Webpack still watches and recompiles files,
+// but disabling the overlay avoids the "Invalid event setCustomCSS" error.
+const fastRefresh = null;
 
 const SANDBOX_SUFFIX = '-sandbox';
 
