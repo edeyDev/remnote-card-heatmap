@@ -4,7 +4,7 @@
   "name": "Card Heatmap",
   "author": "edeyDev",
   "repoUrl": "https://github.com/edeyDev/remnote-card-heatmap",
-  "version": { "major": 1, "minor": 0, "patch": 2 },
+  "version": { "major": 1, "minor": 0, "patch": 3 },
   "theme": [],
   "enableOnMobile": false,
   "description": "Heatmap visual dentro de cada nota para distinguir tarjetas dominadas, en progreso, difíciles y nuevas.",
