@@ -1,5 +1,7 @@
 import { renderWidget, usePlugin, useTracker, WidgetLocation } from '@remnote/plugin-sdk';
 import React, { useEffect, useMemo, useState } from 'react';
+import '../style.css';
+import '../index.css';
 
 type Level = 'mastered' | 'steady' | 'difficult' | 'new';
 type CardRow = {
