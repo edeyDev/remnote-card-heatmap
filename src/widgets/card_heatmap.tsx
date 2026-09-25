@@ -4,6 +4,8 @@ import '../style.css';
 import '../index.css';
 
 type Level = 'mastered' | 'steady' | 'difficult' | 'new';
+type SortMode = 'difficulty' | 'recent' | 'success';
+type Config = { masteredReviews: number; masteredSuccess: number; difficultSuccess: number };
 type CardRow = {
   id: string;
   remId: string;
@@ -14,6 +16,9 @@ type CardRow = {
   lastScore: number | null;
 };
 
+const DEFAULT_CONFIG: Config = { masteredReviews: 4, masteredSuccess: 0.9, difficultSuccess: 0.65 };
+const priority: Record<Level, number> = { new: 0, mastered: 1, steady: 2, difficult: 3 };
+
 const plainText = (value: any): string => {
   if (!value) return '';
   if (typeof value === 'string') return value;
@@ -22,22 +27,33 @@ const plainText = (value: any): string => {
   return '';
 };
 
-const classify = (history: any[] | undefined, wrongInRow = 0): { level: Level; success: number; reviews: number; lastScore: number | null } => {
-  const h = history ?? [];
-  if (!h.length) return { level: 'new', success: 0, reviews: 0, lastScore: null };
-  const scores = h.map((x) => Number(x?.score ?? 0));
-  const remembered = scores.filter((s) => s > 0).length;
-  const success = remembered / scores.length;
+/** Recent reviews count more than old reviews, so the map reacts to a change in performance. */
+const classify = (history: any[] | undefined, wrongInRow = 0, config = DEFAULT_CONFIG) => {
+  const scores = (history ?? []).map((x) => Number(x?.score ?? 0));
+  if (!scores.length) return { level: 'new' as Level, success: 0, reviews: 0, lastScore: null };
+  const weights = scores.map((_, index) => 1 + index / Math.max(1, scores.length - 1));
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+  const success = scores.reduce((sum, score, index) => sum + (score > 0 ? weights[index] : 0), 0) / totalWeight;
   const lastScore = scores[scores.length - 1] ?? null;
   let level: Level = 'steady';
-  if (wrongInRow >= 2 || success < 0.65 || lastScore === 0) level = 'difficult';
-  else if (success >= 0.9 && scores.length >= 4) level = 'mastered';
+  if (wrongInRow >= 2 || success < config.difficultSuccess || lastScore === 0) level = 'difficult';
+  else if (success >= config.masteredSuccess && scores.length >= config.masteredReviews) level = 'mastered';
   return { level, success, reviews: scores.length, lastScore };
 };
 
 export const CardHeatmap = () => {
   const plugin = usePlugin();
   const context = useTracker(async () => plugin.widget.getWidgetContext<WidgetLocation.DocumentBelowTitle>(), []);
+  const config = useTracker(async () => ({
+    masteredReviews: await plugin.settings.getSetting<number>('mastered-reviews') ?? DEFAULT_CONFIG.masteredReviews,
+    masteredSuccess: (await plugin.settings.getSetting<number>('mastered-success') ?? 90) / 100,
+    difficultSuccess: (await plugin.settings.getSetting<number>('difficult-success') ?? 65) / 100,
+  }), []);
+  const settings = config ?? DEFAULT_CONFIG;
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [filter, setFilter] = useState<'all' | Level>('all');
+  const [sort, setSort] = useState<SortMode>('difficulty');
+
   const rows = useTracker(async () => {
     if (!context?.documentId) return [] as CardRow[];
     const document = await plugin.rem.findOne(context.documentId);
@@ -45,87 +61,66 @@ export const CardHeatmap = () => {
     const rems = await document.allRemInDocumentOrPortal();
     const result: CardRow[] = [];
     for (const rem of rems) {
-      const cards = await rem.getCards();
-      for (const card of cards ?? []) {
-        // SDK versions anteriores exponen repetitionHistory; las nuevas usan history.
+      const remCards = await rem.getCards();
+      for (const card of remCards ?? []) {
         const history = (card as any).repetitionHistory ?? (card as any).history;
-        const stats = classify(history, card.timesWrongInRow ?? 0);
-        result.push({
-          id: card._id,
-          remId: rem._id,
-          label: plainText(rem.text) || 'Tarjeta sin texto',
-          ...stats,
-        });
+        const stats = classify(history, card.timesWrongInRow ?? 0, settings);
+        result.push({ id: card._id, remId: rem._id, label: plainText(rem.text) || 'Tarjeta sin texto', ...stats });
       }
     }
     return result;
-  }, [context?.documentId]);
+  }, [context?.documentId, refreshKey, settings.masteredReviews, settings.masteredSuccess, settings.difficultSuccess]);
 
-  const [filter, setFilter] = useState<'all' | Level>('all');
-  const cards = rows ?? [];
+  // Refresh periodically so the map changes after a study session without reloading the note.
+  useEffect(() => {
+    const timer = window.setInterval(() => setRefreshKey((value) => value + 1), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
-  // El heatmap no debe quedarse solamente en este widget: aplica el color
-  // nativo de RemNote al Rem que contiene cada tarjeta. De esta forma el
-  // usuario ve el nivel directamente en el documento.
+  // Color the real Rem, but never overwrite a highlight chosen manually by the user.
   useEffect(() => {
     let cancelled = false;
-
     const applyColors = async () => {
       const levelByRem = new Map<string, Level>();
-      const priority: Record<Level, number> = {
-        new: 0,
-        mastered: 1,
-        steady: 2,
-        difficult: 3,
-      };
-
-      for (const card of cards) {
-        const current = levelByRem.get(card.remId);
-        if (!current || priority[card.level] > priority[current]) {
-          levelByRem.set(card.remId, card.level);
-        }
+      for (const row of rows ?? []) {
+        const current = levelByRem.get(row.remId);
+        if (!current || priority[row.level] > priority[current]) levelByRem.set(row.remId, row.level);
       }
-
       for (const [remId, level] of levelByRem) {
         if (cancelled || level === 'new') continue;
         const rem = await plugin.rem.findOne(remId);
-        if (!rem || cancelled) continue;
-
-        // setHighlightColor es la API nativa de RemNote, por lo que el color
-        // se muestra sobre el item real y no como una copia en el widget.
+        if (!rem || cancelled || await rem.getHighlightColor()) continue;
         const color = level === 'difficult' ? 'Red' : level === 'mastered' ? 'Green' : 'Yellow';
-        if (await rem.getHighlightColor() !== color) {
-          await rem.setHighlightColor(color);
-        }
+        await rem.setHighlightColor(color);
       }
     };
+    if (rows?.length) void applyColors();
+    return () => { cancelled = true; };
+  }, [rows, plugin]);
 
-    if (cards.length) void applyColors();
-    return () => {
-      cancelled = true;
-    };
-  }, [cards, plugin]);
-
-  const visible = useMemo(() => filter === 'all' ? cards : cards.filter((c) => c.level === filter), [cards, filter]);
-  const counts = useMemo(() => cards.reduce((a, c) => ({ ...a, [c.level]: a[c.level] + 1 }), { mastered: 0, steady: 0, difficult: 0, new: 0 } as Record<Level, number>), [cards]);
+  const cards = rows ?? [];
+  const visible = useMemo(() => {
+    const filtered = filter === 'all' ? [...cards] : cards.filter((card) => card.level === filter);
+    return filtered.sort((a, b) => sort === 'success' ? a.success - b.success : sort === 'recent' ? Number(b.lastScore ?? -1) - Number(a.lastScore ?? -1) : priority[b.level] - priority[a.level]);
+  }, [cards, filter, sort]);
+  const counts = useMemo(() => cards.reduce((acc, card) => ({ ...acc, [card.level]: acc[card.level] + 1 }), { mastered: 0, steady: 0, difficult: 0, new: 0 } as Record<Level, number>), [cards]);
+  const masteredPercent = cards.length ? Math.round((counts.mastered / cards.length) * 100) : 0;
 
   const openCard = async (row: CardRow) => {
     const rem = await plugin.rem.findOne(row.remId);
     if (rem) await plugin.window.openRem(rem);
   };
 
-  if (!context) return <div className="ch-loading">Cargando heatmap…</div>;
+  if (!context) return <div className="ch-loading">Cargando mapa de dominio…</div>;
   if (!cards.length) return <div className="ch-empty">No hay tarjetas en esta nota todavía.</div>;
 
   return (
-    <section className="ch-card" aria-label="Heatmap de dificultad de tarjetas">
+    <section className="ch-card" aria-label="Mapa visual de dificultad de tarjetas">
       <div className="ch-header">
-        <div>
-          <div className="ch-title">Mapa de dominio</div>
-          <div className="ch-subtitle">Tarjetas de esta nota · {cards.length} total</div>
-        </div>
-        <button className="ch-refresh" onClick={() => window.location.reload()} title="Actualizar">↻</button>
+        <div><div className="ch-title">Mapa de dominio</div><div className="ch-subtitle">{cards.length} tarjetas · {masteredPercent}% dominadas</div></div>
+        <button className="ch-refresh" onClick={() => setRefreshKey((value) => value + 1)} title="Actualizar análisis">↻</button>
       </div>
+      <div className="ch-progress"><span style={{ width: `${masteredPercent}%` }} /></div>
       <div className="ch-legend">
         <button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>Todas <b>{cards.length}</b></button>
         <button className={filter === 'mastered' ? 'active mastered' : 'mastered'} onClick={() => setFilter('mastered')}><i />Dominadas <b>{counts.mastered}</b></button>
@@ -133,16 +128,15 @@ export const CardHeatmap = () => {
         <button className={filter === 'difficult' ? 'active difficult' : 'difficult'} onClick={() => setFilter('difficult')}><i />Difíciles <b>{counts.difficult}</b></button>
         <button className={filter === 'new' ? 'active new' : 'new'} onClick={() => setFilter('new')}><i />Nuevas <b>{counts.new}</b></button>
       </div>
+      <label className="ch-sort">Ordenar por:
+        <select value={sort} onChange={(event) => setSort(event.target.value as SortMode)}>
+          <option value="difficulty">Mayor dificultad</option><option value="success">Menor retención</option><option value="recent">Último resultado</option>
+        </select>
+      </label>
       <div className="ch-grid">
-        {visible.map((row) => (
-          <button key={row.id} className={`ch-tile ${row.level}`} onClick={() => openCard(row)} title={`${row.label} · ${row.reviews ? Math.round(row.success * 100) + '% de aciertos' : 'sin repasos'}`}>
-            <span className="ch-dot" />
-            <span className="ch-label">{row.label}</span>
-            <span className="ch-meta">{row.reviews ? `${Math.round(row.success * 100)}% · ${row.reviews} repasos` : 'nueva'}</span>
-          </button>
-        ))}
+        {visible.map((row) => <button key={row.id} className={`ch-tile ${row.level}`} onClick={() => openCard(row)} title={`${row.label} · ${row.reviews ? Math.round(row.success * 100) + '% de retención ponderada' : 'sin repasos'}`}><span className="ch-dot" /><span className="ch-label">{row.label}</span><span className="ch-meta">{row.reviews ? `${Math.round(row.success * 100)}% · ${row.reviews} repasos` : 'nueva'}</span></button>)}
       </div>
-      <div className="ch-note">El color se aplica al item real de RemNote: rojo = difícil, amarillo = en progreso y verde = dominado. Los items nuevos quedan sin resaltar.</div>
+      <div className="ch-note">Los colores se aplican al Rem real solo si no tenía un resaltado manual. Rojo = difícil, amarillo = en progreso, verde = dominado. Se actualiza automáticamente cada minuto.</div>
     </section>
   );
 };
